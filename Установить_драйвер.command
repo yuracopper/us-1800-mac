@@ -10,6 +10,8 @@ if [ -f "$DIR/mac-driver/install_hal_driver.sh" ]; then
     sudo "$DIR/mac-driver/install_hal_driver.sh"
 elif [ -f "$DIR/tascam-us1800/mac-driver/install_hal_driver.sh" ]; then
     sudo "$DIR/tascam-us1800/mac-driver/install_hal_driver.sh"
+elif [ -f "$HOME/Documents/GitHub/us-1800-mac/tascam-us1800/mac-driver/install_hal_driver.sh" ]; then
+    sudo "$HOME/Documents/GitHub/us-1800-mac/tascam-us1800/mac-driver/install_hal_driver.sh"
 elif [ -f "$HOME/Desktop/tascam-us1800/mac-driver/install_hal_driver.sh" ]; then
     sudo "$HOME/Desktop/tascam-us1800/mac-driver/install_hal_driver.sh"
 fi

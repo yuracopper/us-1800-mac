@@ -35,11 +35,24 @@ fi
 codesign -f -s - "$DIR/TASCAM_US1800.driver" 2>/dev/null || true
 
 # 3. Compile Diagnostic Monitor
-echo "[3/3] Compiling diagnostic monitor..."
+echo "[3/4] Compiling diagnostic monitor..."
 DEVELOPER_DIR=/Library/Developer/CommandLineTools clang -O2 -Wno-format-extra-args \
   -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -arch arm64 \
   -I"$DIR" \
   -o "$DIR/monitor" "$DIR/monitor.c"
 chmod 755 "$DIR/monitor"
+
+# 4. Compile Pro Audio Native Console Application
+echo "[4/4] Compiling tascam_console_native (Apple Silicon Native Pro Console)..."
+clang -O2 -fobjc-arc -arch arm64 \
+  -framework Cocoa -framework CoreAudio -framework AudioToolbox \
+  -I"$DIR" \
+  -o "$DIR/tascam_console_native" "$DIR/tascam_console_native.m"
+chmod 755 "$DIR/tascam_console_native"
+
+if [ -d "$HOME/Desktop/TASCAM US-1800.app/Contents/MacOS" ]; then
+    cp "$DIR/tascam_console_native" "$HOME/Desktop/TASCAM US-1800.app/Contents/MacOS/tascam_console_native"
+    chmod 755 "$HOME/Desktop/TASCAM US-1800.app/Contents/MacOS/tascam_console_native"
+fi
 
 echo "=== Build Complete Successfully! ==="

@@ -25,8 +25,8 @@ if [ "$EUID" -ne 0 ]; then
     exec sudo "$0" "$@"
 fi
 
-# 1. Accept license if needed
-xcodebuild -license accept 2>/dev/null || true
+# 1. Build latest driver & engine suite
+"$DIR/build.sh"
 
 # 2. Stop running engine
 launchctl bootout system/com.tascam.us1800.live 2>/dev/null || true
@@ -38,6 +38,7 @@ sleep 1
 # 3. Clean old shared memory and set mode to Ultra-Low (0)
 rm -f /var/tmp/tascam* /tmp/tascam* 2>/dev/null || true
 echo "0" > /var/tmp/tascam_mode.conf
+chmod 666 /var/tmp/tascam_mode.conf 2>/dev/null || true
 
 # 4. Install HAL plugin bundle
 echo "[4/7] Installing TASCAM_US1800.driver to $HAL_DIR..."
@@ -55,9 +56,12 @@ chown root:wheel /usr/local/bin/tascam_live_engine
 chmod 755 /usr/local/bin/tascam_live_engine
 
 # Update Desktop App resources
-if [ -d "$APP_DIR/Contents/Resources" ]; then
+if [ -d "$APP_DIR/Contents" ]; then
+    mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
     cp "$DIR/tascam_live_engine" "$APP_DIR/Contents/Resources/tascam_live_engine" 2>/dev/null || true
     cp "$DIR/tascam_gui.py" "$APP_DIR/Contents/Resources/tascam_gui.py" 2>/dev/null || true
+    cp "$DIR/tascam_console_native" "$APP_DIR/Contents/MacOS/tascam_console_native" 2>/dev/null || true
+    chmod 755 "$APP_DIR/Contents/MacOS/tascam_console_native" 2>/dev/null || true
     chown -R "$TARGET_USER":staff "$APP_DIR" 2>/dev/null || true
 fi
 
@@ -99,6 +103,8 @@ launchctl load -w /Library/LaunchDaemons/com.tascam.us1800.live.plist 2>/dev/nul
 launchctl kickstart -k system/com.tascam.us1800.live 2>/dev/null || true
 
 sleep 1
+
+chown -R "$TARGET_USER":staff "$DIR" 2>/dev/null || true
 
 echo ""
 echo "=========================================================="

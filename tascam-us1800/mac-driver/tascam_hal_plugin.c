@@ -129,7 +129,23 @@ static UInt32 is_hardware_alive(void) {
     init_tascam_shm();
     if (!g_tascam_shm) return 0;
     uint32_t running = atomic_load_explicit(&g_tascam_shm->engine_running, memory_order_relaxed);
-    return (running == 1) ? 1 : 0;
+
+    static uint64_t s_last_alive_time = 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+
+    if (running == 1) {
+        s_last_alive_time = now_ms;
+        return 1;
+    }
+
+    /* Grace period: allow 4.0 seconds for USB re-syncs before reporting device death to CoreAudio */
+    if (s_last_alive_time > 0 && (now_ms - s_last_alive_time < 4000)) {
+        return 1;
+    }
+
+    return 0;
 }
 
 #pragma mark BlackHole State
@@ -2936,7 +2952,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			init_tascam_shm();
 			if (g_tascam_shm) {
 				uint32_t sz = atomic_load_explicit(&g_tascam_shm->buffer_frame_size, memory_order_relaxed);
-				if (sz >= 32 && sz <= 2048) {
+				if (sz >= 16 && sz <= 2048) {
 					gDevice_BufferFrameSize = sz;
 				}
 			}
@@ -3117,6 +3133,10 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 					addrs[2].mScope = kAudioObjectPropertyScopeOutput;
 					addrs[2].mElement = kAudioObjectPropertyElementMain;
 					gPlugIn_Host->PropertiesChanged(gPlugIn_Host, inObjectID, 3, addrs);
+
+					dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+						gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, inObjectID, ChangeAction_SetBufferFrameSize, NULL);
+					});
 				}
 				break;
 			}
@@ -4831,13 +4851,24 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
             }
 
             if (avail >= needed_frames) {
+                float in_pk[16] = {0};
                 for (UInt32 f = 0; f < needed_frames; f++) {
                     uint32_t slot = (rd + f) & TASCAM_RING_MASK;
-                    memcpy(&dst[f * TASCAM_IN_CHANNELS],
-                           &g_tascam_shm->cap_ring[slot * TASCAM_IN_CHANNELS],
-                           TASCAM_IN_CHANNELS * sizeof(float));
+                    const float *src_in = &g_tascam_shm->cap_ring[slot * TASCAM_IN_CHANNELS];
+                    memcpy(&dst[f * TASCAM_IN_CHANNELS], src_in, TASCAM_IN_CHANNELS * sizeof(float));
+                    for (int c = 0; c < 16; c++) {
+                        float abs_v = fabsf(src_in[c]);
+                        if (abs_v > in_pk[c]) in_pk[c] = abs_v;
+                    }
                 }
                 atomic_store_explicit(&g_tascam_shm->cap_rd, (rd + needed_frames) & TASCAM_RING_MASK, memory_order_release);
+                for (int c = 0; c < 16; c++) {
+                    if (in_pk[c] > g_tascam_shm->in_peak[c]) {
+                        g_tascam_shm->in_peak[c] = in_pk[c];
+                    } else {
+                        g_tascam_shm->in_peak[c] *= 0.95f;
+                    }
+                }
                 delivered = true;
             }
         }
@@ -4854,27 +4885,29 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
             Float32 vol = gVolume_Master_Value;
             if (gMute_Master_Value) vol = 0.0f;
 
-            /* Dynamically inform live engine of CoreAudio's actual IO block size */
-            if (inIOBufferFrameSize >= 16 && inIOBufferFrameSize <= 4096) {
-                uint32_t cur_b = atomic_load_explicit(&g_tascam_shm->buffer_frame_size, memory_order_relaxed);
-                if (cur_b != inIOBufferFrameSize) {
-                    atomic_store_explicit(&g_tascam_shm->buffer_frame_size, inIOBufferFrameSize, memory_order_relaxed);
-                    pthread_mutex_lock(&gPlugIn_StateMutex);
-                    gDevice_BufferFrameSize = inIOBufferFrameSize;
-                    pthread_mutex_unlock(&gPlugIn_StateMutex);
-                }
-            }
-
             const float *src = (const float *)ioMainBuffer;
             uint32_t wr = atomic_load_explicit(&g_tascam_shm->pb_wr, memory_order_relaxed);
+            float pk[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
             for (UInt32 f = 0; f < inIOBufferFrameSize; f++) {
                 uint32_t slot = (wr + f) & TASCAM_RING_MASK;
                 float *dst_slot = &g_tascam_shm->pb_ring[slot * TASCAM_OUT_CHANNELS];
                 for (int c = 0; c < TASCAM_OUT_CHANNELS; c++) {
-                    dst_slot[c] = src[f * TASCAM_OUT_CHANNELS + c] * vol;
+                    float val = src[f * TASCAM_OUT_CHANNELS + c] * vol;
+                    dst_slot[c] = val;
+                    float abs_v = fabsf(val);
+                    if (abs_v > pk[c]) pk[c] = abs_v;
                 }
             }
             atomic_store_explicit(&g_tascam_shm->pb_wr, (wr + inIOBufferFrameSize) & TASCAM_RING_MASK, memory_order_release);
+
+            for (int c = 0; c < 4; c++) {
+                if (pk[c] > g_tascam_shm->out_peak[c]) {
+                    g_tascam_shm->out_peak[c] = pk[c];
+                } else {
+                    g_tascam_shm->out_peak[c] *= 0.95f;
+                }
+            }
         }
     }
 

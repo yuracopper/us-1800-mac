@@ -1,12 +1,14 @@
 #!/bin/bash
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-if [ -f "$APP_DIR/Resources/tascam_gui.py" ]; then
-    SCRIPT="$APP_DIR/Resources/tascam_gui.py"
-elif [ -f "/Users/yura/.gemini/antigravity/scratch/tascam-us1800/mac-driver/tascam_gui.py" ]; then
-    SCRIPT="/Users/yura/.gemini/antigravity/scratch/tascam-us1800/mac-driver/tascam_gui.py"
-else
-    SCRIPT="$(dirname "$0")/tascam_gui.py"
+if [ -x "$APP_DIR/MacOS/tascam_console_native" ]; then
+    exec "$APP_DIR/MacOS/tascam_console_native"
+elif [ -x "$APP_DIR/../../tascam-us1800/mac-driver/tascam_console_native" ]; then
+    exec "$APP_DIR/../../tascam-us1800/mac-driver/tascam_console_native"
+elif [ -x "$APP_DIR/../mac-driver/tascam_console_native" ]; then
+    exec "$APP_DIR/../mac-driver/tascam_console_native"
+elif [ -x "/usr/local/bin/tascam_console_native" ]; then
+    exec "/usr/local/bin/tascam_console_native"
+elif [ -f "$APP_DIR/Resources/tascam_gui.py" ]; then
+    exec /usr/bin/python3 "$APP_DIR/Resources/tascam_gui.py" 2>/tmp/tascam_gui_err.log
 fi
-
-exec /usr/bin/python3 "$SCRIPT" 2>/tmp/tascam_gui_err.log

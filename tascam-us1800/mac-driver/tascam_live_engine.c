@@ -63,7 +63,7 @@
 #define EP_AUDIO_OUT                 0x02
 #define EP_AUDIO_IN                  0x86
 
-#define NUM_PLAYBACK_XFERS   8
+#define NUM_PLAYBACK_XFERS   12
 #define ISOC_FRAMES_PER_XFER 8
 #define MAX_FRAMES_PER_PKT   24
 #define PLAYBACK_CHANNELS    4
@@ -81,37 +81,30 @@ static void on_sig(int s) { (void)s; g_running = 0; }
 
 static inline bool is_usb_fatal_error(IOReturn res) {
     if (res == kIOReturnSuccess) return false;
-    /* Isochronous timing errors, frame skips, and pipe stalls are non-fatal */
-    if (res == (IOReturn)0xe00002ee) return false; /* kIOReturnIsoTooOld */
-    if (res == (IOReturn)0xe000404c) return false; /* kIOReturnIsoTooOld variant */
-    if (res == (IOReturn)0xe000404f) return false; /* pipe stall */
-    if (res == (IOReturn)0xe00002e7) return false; /* underrun */
-    if (res == (IOReturn)0xe00002e8) return false; /* overrun */
-    /* Only true disconnect codes are fatal */
+    /* ONLY physical device unplug codes are fatal: */
     if (res == (IOReturn)0xe00002c0) return true;  /* kIOReturnNoDevice */
-    if (res == (IOReturn)0xe00002d5) return true;  /* kIOReturnOffline */
-    if (res == (IOReturn)0xe00002eb) return true;  /* kIOReturnAborted */
+    if (res == (IOReturn)0xe00002d7) return true;  /* kIOReturnNotAttached */
+    /* All other conditions (aborted packets 0xe00002eb, frame skips, stalls) are recoverable */
     return false;
 }
 
 static void set_realtime_priority(void) {
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+
     struct mach_timebase_info tb;
     mach_timebase_info(&tb);
 
     thread_time_constraint_policy_data_t policy;
-    policy.period = (uint32_t)((1000000ULL * tb.denom) / tb.numer);
-    policy.computation = (uint32_t)((250000ULL * tb.denom) / tb.numer);
-    policy.constraint = (uint32_t)((500000ULL * tb.denom) / tb.numer);
+    policy.period = (uint32_t)((5000000ULL * tb.denom) / tb.numer);      /* 5ms */
+    policy.computation = (uint32_t)((3000000ULL * tb.denom) / tb.numer); /* 3ms budget */
+    policy.constraint = (uint32_t)((4000000ULL * tb.denom) / tb.numer);  /* 4ms constraint */
     policy.preemptible = 1;
 
-    kern_return_t kr = thread_policy_set(
+    thread_policy_set(
         mach_thread_self(),
         THREAD_TIME_CONSTRAINT_POLICY,
         (thread_policy_t)&policy,
         THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-    if (kr != KERN_SUCCESS) {
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-    }
 }
 
 static IOUSBDeviceInterface300 **g_dev = NULL;
@@ -290,6 +283,7 @@ static void on_bulk_complete(void *refCon, IOReturn result, void *arg0) {
     UInt32 bytes = (UInt32)(uintptr_t)arg0;
 
     if (is_usb_fatal_error(result)) {
+        fprintf(stderr, "[!] on_bulk_complete fatal error: 0x%08x\n", result);
         g_disconnected = 1;
         return;
     }
@@ -319,7 +313,11 @@ static void on_bulk_complete(void *refCon, IOReturn result, void *arg0) {
         atomic_store_explicit(&g_shm->cap_wr, (wr + frames) & TASCAM_RING_MASK, memory_order_release);
 
         for (int c = 0; c < 16; c++) {
-            g_shm->in_peak[c] = peak[c];
+            if (peak[c] > g_shm->in_peak[c]) {
+                g_shm->in_peak[c] = peak[c];
+            } else {
+                g_shm->in_peak[c] *= 0.999f;
+            }
         }
         atomic_fetch_add_explicit(&g_shm->engine_heartbeat, 1, memory_order_relaxed);
     }
@@ -330,14 +328,26 @@ static void on_bulk_complete(void *refCon, IOReturn result, void *arg0) {
 }
 
 static void queue_bulk_read(int buf_idx) {
-    if (!g_if1 || g_disconnected || !g_running) return;
+    if (!g_if1 || g_pipe_bulk_in < 0 || g_disconnected || !g_running) return;
     kern_return_t kr = (*g_if1)->ReadPipeAsync(
         g_if1, g_pipe_bulk_in, g_capture_bufs[buf_idx], CAPTURE_BUF_SIZE,
         on_bulk_complete, (void *)(intptr_t)buf_idx);
-    if (kr == (kern_return_t)0xe000404f && g_if1) {
-        (*g_if1)->ClearPipeStallBothEnds(g_if1, g_pipe_bulk_in);
-    } else if (is_usb_fatal_error(kr)) {
-        g_disconnected = 1;
+    if (kr != kIOReturnSuccess) {
+        if (is_usb_fatal_error(kr)) {
+            fprintf(stderr, "[!] queue_bulk_read fatal error: 0x%08x\n", kr);
+            g_disconnected = 1;
+            return;
+        }
+        if (kr == (kern_return_t)0xe000404f && g_if1) {
+            (*g_if1)->ClearPipeStallBothEnds(g_if1, g_pipe_bulk_in);
+        }
+        kr = (*g_if1)->ReadPipeAsync(
+            g_if1, g_pipe_bulk_in, g_capture_bufs[buf_idx], CAPTURE_BUF_SIZE,
+            on_bulk_complete, (void *)(intptr_t)buf_idx);
+        if (kr != kIOReturnSuccess && is_usb_fatal_error(kr)) {
+            fprintf(stderr, "[!] queue_bulk_read retry fatal error: 0x%08x\n", kr);
+            g_disconnected = 1;
+        }
     }
 }
 
@@ -346,7 +356,7 @@ static void resync_playback(void) {
     UInt64 f = 0;
     AbsoluteTime t;
     (*g_if0)->GetBusFrameNumber(g_if0, &f, &t);
-    if (g_next_isoc_frame < f + 3 || g_next_isoc_frame > f + 24) {
+    if (g_next_isoc_frame < f + 3 || g_next_isoc_frame > f + 28) {
         g_next_isoc_frame = f + 4;
     }
 }
@@ -378,15 +388,22 @@ static void submit_fb(FbXfer *x) {
         g_if1, g_pipe_fb, x->buf, x->start_frame,
         1, 1, x->frames, on_fb_complete, x);
 
-    if (kr == (kern_return_t)0xe00002ee || kr == (kern_return_t)0xe000404c) {
+    if (kr != kIOReturnSuccess) {
+        if (is_usb_fatal_error(kr)) {
+            fprintf(stderr, "[!] submit_fb fatal error: 0x%08x\n", kr);
+            g_disconnected = 1;
+            return;
+        }
         resync_fb();
         x->start_frame = g_fb_next_frame;
         g_fb_next_frame += 1;
-        (*g_if1)->LowLatencyReadIsochPipeAsync(
+        kr = (*g_if1)->LowLatencyReadIsochPipeAsync(
             g_if1, g_pipe_fb, x->buf, x->start_frame,
             1, 1, x->frames, on_fb_complete, x);
-    } else if (is_usb_fatal_error(kr)) {
-        g_disconnected = 1;
+        if (kr != kIOReturnSuccess && is_usb_fatal_error(kr)) {
+            fprintf(stderr, "[!] submit_fb retry fatal error: 0x%08x\n", kr);
+            g_disconnected = 1;
+        }
     }
 }
 
@@ -394,6 +411,7 @@ static void on_fb_complete(void *refCon, IOReturn result, void *arg0) {
     (void)arg0;
     FbXfer *x = (FbXfer *)refCon;
     if (is_usb_fatal_error(result)) {
+        fprintf(stderr, "[!] on_fb_complete fatal error: 0x%08x\n", result);
         g_disconnected = 1;
         return;
     }
@@ -420,7 +438,7 @@ static void on_fb_complete(void *refCon, IOReturn result, void *arg0) {
                 }
             }
         }
-    } else if (result == (IOReturn)0xe00002ee) {
+    } else if (result == (IOReturn)0xe00002ee || result == (IOReturn)0xe00002eb || result == (IOReturn)0xe000404c) {
         resync_fb();
     }
     if (g_running && !g_disconnected && g_if1 && g_pipe_fb > 0) {
@@ -435,6 +453,7 @@ static void on_pb_complete(void *ref, IOReturn result, void *arg0) {
     PlaybackXfer *x = (PlaybackXfer *)ref;
 
     if (is_usb_fatal_error(result)) {
+        fprintf(stderr, "[!] on_pb_complete fatal error: 0x%08x\n", result);
         g_disconnected = 1;
         return;
     }
@@ -443,7 +462,7 @@ static void on_pb_complete(void *ref, IOReturn result, void *arg0) {
         (*g_if0)->ClearPipeStallBothEnds(g_if0, g_pipe_out);
     }
 
-    if (result == (IOReturn)0xe00002ee) {
+    if (result == (IOReturn)0xe00002ee || result == (IOReturn)0xe00002eb || result == (IOReturn)0xe000404c) {
         resync_playback();
     } else if (result != kIOReturnSuccess) {
         static uint32_t s_err_count = 0;
@@ -534,31 +553,23 @@ static void submit_playback(PlaybackXfer *x) {
         if (buf_sz < 16) buf_sz = 16;
         if (buf_sz > 2048) buf_sz = 2048;
 
-        static uint32_t s_last_applied_mode = 999;
-        static uint32_t s_last_applied_buf = 999;
         uint32_t mode = atomic_load_explicit(&g_shm->latency_mode, memory_order_relaxed);
         uint32_t target_cushion;
         if (mode == TASCAM_MODE_LOW_LATENCY) {
             /* Mode 0: Ultra-Low Latency (Live, ~5-6ms physical RTL) */
-            target_cushion = buf_sz;
-            if (target_cushion < 32) target_cushion = 32;
-            if (target_cushion > 128) target_cushion = 128;
+            target_cushion = buf_sz * 2;
+            if (target_cushion < 128) target_cushion = 128;
+            if (target_cushion > 1024) target_cushion = 1024;
         } else if (mode == TASCAM_MODE_BALANCED) {
             /* Mode 1: Balanced Studio (~8-10ms RTL) */
-            target_cushion = buf_sz * 2;
-            if (target_cushion < 64) target_cushion = 64;
-            if (target_cushion > 256) target_cushion = 256;
+            target_cushion = buf_sz * 3;
+            if (target_cushion < 256) target_cushion = 256;
+            if (target_cushion > 2048) target_cushion = 2048;
         } else {
             /* Mode 2: Safe Conservative (Solid buffer protection) */
-            target_cushion = buf_sz * 3;
-            if (target_cushion < 128) target_cushion = 128;
-            if (target_cushion > 512) target_cushion = 512;
-        }
-
-        /* Seamless cushion adaptation when user switches mode or buffer size */
-        if (mode != s_last_applied_mode || buf_sz != s_last_applied_buf) {
-            s_last_applied_mode = mode;
-            s_last_applied_buf = buf_sz;
+            target_cushion = buf_sz * 4;
+            if (target_cushion < 512) target_cushion = 512;
+            if (target_cushion > 4096) target_cushion = 4096;
         }
 
         const char *env_cushion = getenv("TASCAM_CUSHION_FRAMES");
@@ -576,11 +587,11 @@ static void submit_playback(PlaybackXfer *x) {
         }
 
         if (avail == 0) {
-            /* Output silence on starvation */
+            /* Output silence on momentary starvation */
             memset(x->audio, 0, total_bytes);
-            for (int c = 0; c < 4; c++) g_shm->out_peak[c] = 0.0f;
+            for (int c = 0; c < 4; c++) g_shm->out_peak[c] *= 0.995f;
             s_idle_count++;
-            if (s_idle_count >= 20) { /* 20ms of silence = stream stopped/idle, set buffering */
+            if (s_idle_count >= 150) { /* 150ms of silence = stream genuinely stopped/idle */
                 s_buffering = true;
                 rd = wr;
                 atomic_store_explicit(&g_shm->pb_rd, wr, memory_order_release);
@@ -588,11 +599,11 @@ static void submit_playback(PlaybackXfer *x) {
         } else {
             s_idle_count = 0;
 
-            /* While buffering after silence, wait for target cushion to fill before playing */
+            /* While buffering after genuine silence, wait for safety cushion to fill before playing */
             if (s_buffering) {
-                if (avail < target_cushion) {
+                if (avail < (target_cushion / 2)) {
                     memset(x->audio, 0, total_bytes);
-                    for (int c = 0; c < 4; c++) g_shm->out_peak[c] = 0.0f;
+                    for (int c = 0; c < 4; c++) g_shm->out_peak[c] *= 0.995f;
                 } else {
                     /* Cushion filled! Start playback cleanly without skipping any audio */
                     s_buffering = false;
@@ -661,24 +672,34 @@ static void submit_playback(PlaybackXfer *x) {
         /* Advance rd by EXACTLY frames_to_read: zero pitch drift */
         rd = (rd + frames_to_read) & TASCAM_RING_MASK;
 
-        /* Gentle, inaudible buffer drift control scaled to target_cushion */
-        static uint32_t s_drift_check_counter = 0;
-        if (++s_drift_check_counter >= 500) { /* check twice every second */
-            s_drift_check_counter = 0;
-            uint32_t drift_tolerance = target_cushion / 4;
-            if (drift_tolerance < 8) drift_tolerance = 8;
+        /* Robust window-based clock drift tracker (immune to CoreAudio burst jitter) */
+        static uint32_t s_drift_counter = 0;
+        static uint32_t s_window_min_avail = 999999;
+        if (avail < s_window_min_avail) s_window_min_avail = avail;
 
-            if (avail > target_cushion + drift_tolerance && avail < 16384) {
-                /* Read pointer falling behind (write buffer growing), advance rd by 1 extra frame */
+        if (++s_drift_counter >= 1000) { /* Check once per second (1000 x 1ms transfers) */
+            s_drift_counter = 0;
+            uint32_t safe_floor = target_cushion / 3;
+            if (safe_floor < 32) safe_floor = 32;
+
+            if (s_window_min_avail > target_cushion + (target_cushion / 2) && s_window_min_avail < 16384) {
+                /* Host CoreAudio is clocking slightly faster than USB hardware, gently advance 1 frame */
                 rd = (rd + 1) & TASCAM_RING_MASK;
-            } else if (avail < target_cushion - drift_tolerance && avail > 32) {
-                /* Read pointer getting too close (write buffer shrinking), hold rd by 1 frame */
+            } else if (s_window_min_avail < safe_floor && s_window_min_avail > 10) {
+                /* Host CoreAudio is clocking slightly slower than USB hardware, gently hold 1 frame */
                 rd = (rd - 1) & TASCAM_RING_MASK;
             }
+            s_window_min_avail = 999999;
         }
 
         atomic_store_explicit(&g_shm->pb_rd, rd, memory_order_release);
-        for (int c = 0; c < 4; c++) g_shm->out_peak[c] = peak[c];
+        for (int c = 0; c < 4; c++) {
+            if (peak[c] > g_shm->out_peak[c]) {
+                g_shm->out_peak[c] = peak[c];
+            } else {
+                g_shm->out_peak[c] *= 0.998f;
+            }
+        }
         }
     }
 } else {
@@ -692,23 +713,25 @@ static void submit_playback(PlaybackXfer *x) {
         g_if0, g_pipe_out, x->audio, x->start_frame,
         ISOC_FRAMES_PER_XFER, 1, x->frames, on_pb_complete, x);
 
-    if (kr == (kern_return_t)0xe00002ee || kr == (kern_return_t)0xe000404c) {
+    if (kr != kIOReturnSuccess) {
+        if (is_usb_fatal_error(kr)) {
+            fprintf(stderr, "[!] submit_playback fatal error: 0x%08x\n", kr);
+            g_disconnected = 1;
+            return;
+        }
+        if (kr == (kern_return_t)0xe000404f && g_if0) {
+            (*g_if0)->ClearPipeStallBothEnds(g_if0, g_pipe_out);
+        }
         resync_playback();
         x->start_frame = g_next_isoc_frame;
         g_next_isoc_frame += 1;
-        (*g_if0)->LowLatencyWriteIsochPipeAsync(
+        kr = (*g_if0)->LowLatencyWriteIsochPipeAsync(
             g_if0, g_pipe_out, x->audio, x->start_frame,
             ISOC_FRAMES_PER_XFER, 1, x->frames, on_pb_complete, x);
-    } else if (kr == (kern_return_t)0xe000404f && g_if0) {
-        (*g_if0)->ClearPipeStallBothEnds(g_if0, g_pipe_out);
-        resync_playback();
-        x->start_frame = g_next_isoc_frame;
-        g_next_isoc_frame += 1;
-        (*g_if0)->LowLatencyWriteIsochPipeAsync(
-            g_if0, g_pipe_out, x->audio, x->start_frame,
-            ISOC_FRAMES_PER_XFER, 1, x->frames, on_pb_complete, x);
-    } else if (is_usb_fatal_error(kr)) {
-        g_disconnected = 1;
+        if (kr != kIOReturnSuccess && is_usb_fatal_error(kr)) {
+            fprintf(stderr, "[!] submit_playback retry fatal error: 0x%08x\n", kr);
+            g_disconnected = 1;
+        }
     }
 }
 
@@ -1034,16 +1057,6 @@ int main(int argc, char *argv[]) {
         }
 
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
-
-        static int s_addr_check = 0;
-        if (g_dev && ++s_addr_check >= 100) {
-            s_addr_check = 0;
-            USBDeviceAddress dev_addr = 0;
-            kern_return_t kr = (*g_dev)->GetDeviceAddress(g_dev, &dev_addr);
-            if (is_usb_fatal_error(kr)) {
-                g_disconnected = 1;
-            }
-        }
 
         if (g_disconnected) {
             fprintf(stderr, "[!] USB connection lost! Cleaning up...\n");
