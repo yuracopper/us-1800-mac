@@ -63,7 +63,7 @@
 #define EP_AUDIO_OUT                 0x02
 #define EP_AUDIO_IN                  0x86
 
-#define NUM_PLAYBACK_XFERS   4
+#define NUM_PLAYBACK_XFERS   8
 #define ISOC_FRAMES_PER_XFER 8
 #define MAX_FRAMES_PER_PKT   24
 #define PLAYBACK_CHANNELS    4
@@ -81,9 +81,17 @@ static void on_sig(int s) { (void)s; g_running = 0; }
 
 static inline bool is_usb_fatal_error(IOReturn res) {
     if (res == kIOReturnSuccess) return false;
-    if (res == (IOReturn)0xe00002ee) return false; /* isoc time passed / needs resync */
-    if (res == (IOReturn)0xe000404f) return false; /* pipe stall (handled by clear stall) */
-    return true; /* kIOReturnNoDevice, kIOReturnNotResponding, kIOReturnAborted, etc. */
+    /* Isochronous timing errors, frame skips, and pipe stalls are non-fatal */
+    if (res == (IOReturn)0xe00002ee) return false; /* kIOReturnIsoTooOld */
+    if (res == (IOReturn)0xe000404c) return false; /* kIOReturnIsoTooOld variant */
+    if (res == (IOReturn)0xe000404f) return false; /* pipe stall */
+    if (res == (IOReturn)0xe00002e7) return false; /* underrun */
+    if (res == (IOReturn)0xe00002e8) return false; /* overrun */
+    /* Only true disconnect codes are fatal */
+    if (res == (IOReturn)0xe00002c0) return true;  /* kIOReturnNoDevice */
+    if (res == (IOReturn)0xe00002d5) return true;  /* kIOReturnOffline */
+    if (res == (IOReturn)0xe00002eb) return true;  /* kIOReturnAborted */
+    return false;
 }
 
 static void set_realtime_priority(void) {
@@ -151,7 +159,7 @@ static PlaybackXfer g_pb_xfers[NUM_PLAYBACK_XFERS];
 static uint8_t g_capture_bufs[NUM_CAPTURE_BUFS][CAPTURE_BUF_SIZE];
 
 /* Feedback Transfers (EP 0x81) */
-#define NUM_FB_XFERS 4
+#define NUM_FB_XFERS 8
 typedef struct {
     uint8_t *buf;
     IOUSBLowLatencyIsocFrame *frames;
@@ -338,8 +346,8 @@ static void resync_playback(void) {
     UInt64 f = 0;
     AbsoluteTime t;
     (*g_if0)->GetBusFrameNumber(g_if0, &f, &t);
-    if (g_next_isoc_frame < f + 2 || g_next_isoc_frame > f + 16) {
-        g_next_isoc_frame = f + 3;
+    if (g_next_isoc_frame < f + 3 || g_next_isoc_frame > f + 24) {
+        g_next_isoc_frame = f + 4;
     }
 }
 
@@ -348,8 +356,8 @@ static void resync_fb(void) {
     UInt64 f = 0;
     AbsoluteTime t;
     (*g_if1)->GetBusFrameNumber(g_if1, &f, &t);
-    if (g_fb_next_frame < f + 2 || g_fb_next_frame > f + 16) {
-        g_fb_next_frame = f + 3;
+    if (g_fb_next_frame < f + 3 || g_fb_next_frame > f + 24) {
+        g_fb_next_frame = f + 4;
     }
 }
 
@@ -370,7 +378,7 @@ static void submit_fb(FbXfer *x) {
         g_if1, g_pipe_fb, x->buf, x->start_frame,
         1, 1, x->frames, on_fb_complete, x);
 
-    if (kr == (kern_return_t)0xe00002ee) {
+    if (kr == (kern_return_t)0xe00002ee || kr == (kern_return_t)0xe000404c) {
         resync_fb();
         x->start_frame = g_fb_next_frame;
         g_fb_next_frame += 1;
@@ -684,7 +692,7 @@ static void submit_playback(PlaybackXfer *x) {
         g_if0, g_pipe_out, x->audio, x->start_frame,
         ISOC_FRAMES_PER_XFER, 1, x->frames, on_pb_complete, x);
 
-    if (kr == (kern_return_t)0xe00002ee) {
+    if (kr == (kern_return_t)0xe00002ee || kr == (kern_return_t)0xe000404c) {
         resync_playback();
         x->start_frame = g_next_isoc_frame;
         g_next_isoc_frame += 1;
@@ -1025,9 +1033,11 @@ int main(int argc, char *argv[]) {
                             "    Ready for low-latency live concert mixing!\n", g_rate);
         }
 
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
 
-        if (g_dev) {
+        static int s_addr_check = 0;
+        if (g_dev && ++s_addr_check >= 100) {
+            s_addr_check = 0;
             USBDeviceAddress dev_addr = 0;
             kern_return_t kr = (*g_dev)->GetDeviceAddress(g_dev, &dev_addr);
             if (is_usb_fatal_error(kr)) {
