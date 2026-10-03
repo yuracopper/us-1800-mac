@@ -1,0 +1,12 @@
+#!/bin/bash
+APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ -f "$APP_DIR/Resources/tascam_gui.py" ]; then
+    SCRIPT="$APP_DIR/Resources/tascam_gui.py"
+elif [ -f "/Users/yura/.gemini/antigravity/scratch/tascam-us1800/mac-driver/tascam_gui.py" ]; then
+    SCRIPT="/Users/yura/.gemini/antigravity/scratch/tascam-us1800/mac-driver/tascam_gui.py"
+else
+    SCRIPT="$(dirname "$0")/tascam_gui.py"
+fi
+
+exec /usr/bin/python3 "$SCRIPT" 2>/tmp/tascam_gui_err.log

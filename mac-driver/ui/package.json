@@ -1,0 +1,24 @@
+{
+  "name": "tascam-us1800-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n api,ui -c blue,green \"cd .. && python3 tascam_api.py\" \"vite\"",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@chakra-ui/react": "^3",
+    "@emotion/react": "^11",
+    "next-themes": "^0.4",
+    "react": "^19",
+    "react-dom": "^19",
+    "react-icons": "^5"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@vitejs/plugin-react": "^4",
+    "concurrently": "^9",
+    "vite": "^6"
+  }
+}

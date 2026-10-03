@@ -1,0 +1,33 @@
+# Built driver (rebuild: run tascam_api.py or see tascam_usb.c header)
+tascam_usb
+
+# Python
+__pycache__/
+*.py[cod]
+.Python
+*.egg-info/
+.eggs/
+venv/
+.venv/
+.env
+
+# Logs & runtime state (next to tascam_api.py)
+*.log
+live_capture_gain.txt
+
+# UI / Node
+ui/node_modules/
+ui/dist/
+ui/.vite/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local captures / test media (optional — remove these lines to track small fixtures)
+*.wav
+*.mp3
+test_music.raw
