@@ -79,6 +79,13 @@ static volatile int g_running = 1;
 static volatile int g_disconnected = 0;
 static void on_sig(int s) { (void)s; g_running = 0; }
 
+static inline bool is_usb_fatal_error(IOReturn res) {
+    if (res == kIOReturnSuccess) return false;
+    if (res == (IOReturn)0xe00002ee) return false; /* isoc time passed / needs resync */
+    if (res == (IOReturn)0xe000404f) return false; /* pipe stall (handled by clear stall) */
+    return true; /* kIOReturnNoDevice, kIOReturnNotResponding, kIOReturnAborted, etc. */
+}
+
 static void set_realtime_priority(void) {
     struct mach_timebase_info tb;
     mach_timebase_info(&tb);
@@ -274,7 +281,7 @@ static void on_bulk_complete(void *refCon, IOReturn result, void *arg0) {
     int buf_idx = (int)(intptr_t)refCon;
     UInt32 bytes = (UInt32)(uintptr_t)arg0;
 
-    if (result == (IOReturn)0xe00002c0 || result == kIOReturnNoDevice) {
+    if (is_usb_fatal_error(result)) {
         g_disconnected = 1;
         return;
     }
@@ -321,6 +328,8 @@ static void queue_bulk_read(int buf_idx) {
         on_bulk_complete, (void *)(intptr_t)buf_idx);
     if (kr == (kern_return_t)0xe000404f && g_if1) {
         (*g_if1)->ClearPipeStallBothEnds(g_if1, g_pipe_bulk_in);
+    } else if (is_usb_fatal_error(kr)) {
+        g_disconnected = 1;
     }
 }
 
@@ -329,9 +338,7 @@ static void resync_playback(void) {
     UInt64 f = 0;
     AbsoluteTime t;
     (*g_if0)->GetBusFrameNumber(g_if0, &f, &t);
-    if (g_next_isoc_frame < f + 8) {
-        fprintf(stderr, "[!] resync_playback: was %llu, bus=%llu -> jumping to %llu\n",
-                g_next_isoc_frame, f, f + 12);
+    if (g_next_isoc_frame < f + 8 || g_next_isoc_frame > f + 200) {
         g_next_isoc_frame = f + 12;
     }
 }
@@ -341,7 +348,9 @@ static void resync_fb(void) {
     UInt64 f = 0;
     AbsoluteTime t;
     (*g_if1)->GetBusFrameNumber(g_if1, &f, &t);
-    g_fb_next_frame = f + 10;
+    if (g_fb_next_frame < f + 8 || g_fb_next_frame > f + 200) {
+        g_fb_next_frame = f + 12;
+    }
 }
 
 static void on_fb_complete(void *refCon, IOReturn result, void *arg0);
@@ -368,13 +377,15 @@ static void submit_fb(FbXfer *x) {
         (*g_if1)->LowLatencyReadIsochPipeAsync(
             g_if1, g_pipe_fb, x->buf, x->start_frame,
             1, 1, x->frames, on_fb_complete, x);
+    } else if (is_usb_fatal_error(kr)) {
+        g_disconnected = 1;
     }
 }
 
 static void on_fb_complete(void *refCon, IOReturn result, void *arg0) {
     (void)arg0;
     FbXfer *x = (FbXfer *)refCon;
-    if (result == (IOReturn)0xe00002c0 || result == kIOReturnNoDevice) {
+    if (is_usb_fatal_error(result)) {
         g_disconnected = 1;
         return;
     }
@@ -415,7 +426,7 @@ static void on_pb_complete(void *ref, IOReturn result, void *arg0) {
     (void)arg0;
     PlaybackXfer *x = (PlaybackXfer *)ref;
 
-    if (result == (IOReturn)0xe00002c0 || result == kIOReturnNoDevice) {
+    if (is_usb_fatal_error(result)) {
         g_disconnected = 1;
         return;
     }
@@ -547,7 +558,6 @@ static void submit_playback(PlaybackXfer *x) {
             target_cushion = (uint32_t)atoi(env_cushion);
         }
 
-        static bool s_buffering = true;
         static uint32_t s_idle_count = 0;
 
         /* Underrun check: if rd has overtaken wr, avail is near 32768 */
@@ -689,7 +699,7 @@ static void submit_playback(PlaybackXfer *x) {
         (*g_if0)->LowLatencyWriteIsochPipeAsync(
             g_if0, g_pipe_out, x->audio, x->start_frame,
             ISOC_FRAMES_PER_XFER, 1, x->frames, on_pb_complete, x);
-    } else if (kr == (kern_return_t)0xe00002c0 || kr == kIOReturnNoDevice) {
+    } else if (is_usb_fatal_error(kr)) {
         g_disconnected = 1;
     }
 }
@@ -697,6 +707,8 @@ static void submit_playback(PlaybackXfer *x) {
 static void cleanup_hardware(void) {
     if (g_shm) {
         atomic_store(&g_shm->engine_running, 0);
+        for (int c = 0; c < 4; c++) g_shm->out_peak[c] = 0.0f;
+        for (int c = 0; c < 16; c++) g_shm->in_peak[c] = 0.0f;
     }
 
     if (g_dev) {
@@ -754,7 +766,13 @@ static void cleanup_hardware(void) {
     g_pipe_out = -1;
     g_pipe_bulk_in = -1;
     g_pipe_fb = -1;
+    g_next_isoc_frame = 0;
+    g_fb_next_frame = 0;
+    g_phase_accum = 0;
+    g_feedback_synced = false;
+    g_fb_skip = 8;
     s_buffering = true;
+    g_chime_frames_left = 0;
 }
 
 static bool try_init_hardware(void) {
@@ -782,8 +800,18 @@ static bool try_init_hardware(void) {
     (*plug)->Release(plug);
     if (!g_dev) return false;
 
-    (*g_dev)->USBDeviceOpen(g_dev);
+    kern_return_t ok = (*g_dev)->USBDeviceOpen(g_dev);
+    if (ok != kIOReturnSuccess) {
+        ok = (*g_dev)->USBDeviceOpenSeize(g_dev);
+    }
+    if (ok != kIOReturnSuccess) {
+        (*g_dev)->Release(g_dev);
+        g_dev = NULL;
+        return false;
+    }
+
     (*g_dev)->SetConfiguration(g_dev, 1);
+    usleep(50000);
 
     IOUSBFindInterfaceRequest req = {
         kIOUSBFindInterfaceDontCare, kIOUSBFindInterfaceDontCare,
@@ -815,8 +843,23 @@ static bool try_init_hardware(void) {
         return false;
     }
 
-    (*g_if0)->USBInterfaceOpen(g_if0);
-    (*g_if1)->USBInterfaceOpen(g_if1);
+    ok = (*g_if0)->USBInterfaceOpen(g_if0);
+    if (ok != kIOReturnSuccess) {
+        ok = (*g_if0)->USBInterfaceOpenSeize(g_if0);
+    }
+    if (ok != kIOReturnSuccess) {
+        cleanup_hardware();
+        return false;
+    }
+
+    ok = (*g_if1)->USBInterfaceOpen(g_if1);
+    if (ok != kIOReturnSuccess) {
+        ok = (*g_if1)->USBInterfaceOpenSeize(g_if1);
+    }
+    if (ok != kIOReturnSuccess) {
+        cleanup_hardware();
+        return false;
+    }
 
     uint8_t fw_buf[16] = {0};
     ctrl_msg(g_dev, VENDOR_REQ_FIRMWARE_READ, RT_D2H_VENDOR_DEV, 0, 0, fw_buf, 15);
@@ -859,6 +902,14 @@ static bool try_init_hardware(void) {
     CFRunLoopAddSource(CFRunLoopGetCurrent(), g_src0, kCFRunLoopDefaultMode);
     CFRunLoopAddSource(CFRunLoopGetCurrent(), g_src1, kCFRunLoopDefaultMode);
 
+    /* Synchronize shared memory pointers so reconnect plays immediately without glitch */
+    if (g_shm) {
+        uint32_t wr = atomic_load_explicit(&g_shm->pb_wr, memory_order_relaxed);
+        atomic_store_explicit(&g_shm->pb_rd, wr, memory_order_release);
+        uint32_t cap_w = atomic_load_explicit(&g_shm->cap_wr, memory_order_relaxed);
+        atomic_store_explicit(&g_shm->cap_rd, cap_w, memory_order_release);
+    }
+
     /* Setup Playback Low-Latency Transfers */
     int max_pkt = PLAYBACK_CHANNELS * BYTES_PER_SAMPLE * MAX_FRAMES_PER_PKT;
     UInt32 abuf_sz = ISOC_FRAMES_PER_XFER * max_pkt;
@@ -873,6 +924,7 @@ static bool try_init_hardware(void) {
         g_pb_xfers[i].idx = i;
     }
 
+    g_next_isoc_frame = 0;
     resync_playback();
     s_buffering = true;
 
@@ -890,6 +942,7 @@ static bool try_init_hardware(void) {
             g_fb_xfers[i].frames = (IOUSBLowLatencyIsocFrame *)f_ptr;
             g_fb_xfers[i].idx = i;
         }
+        g_fb_next_frame = 0;
         resync_fb();
         for (int i = 0; i < NUM_FB_XFERS; i++) {
             submit_fb(&g_fb_xfers[i]);
@@ -974,11 +1027,19 @@ int main(int argc, char *argv[]) {
 
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
 
+        if (g_dev) {
+            USBDeviceAddress dev_addr = 0;
+            kern_return_t kr = (*g_dev)->GetDeviceAddress(g_dev, &dev_addr);
+            if (is_usb_fatal_error(kr)) {
+                g_disconnected = 1;
+            }
+        }
+
         if (g_disconnected) {
-            fprintf(stderr, "[!] USB connection lost! Reconnecting...\n");
+            fprintf(stderr, "[!] USB connection lost! Cleaning up...\n");
             cleanup_hardware();
             g_disconnected = 0;
-            usleep(500000);
+            usleep(250000);
             continue;
         }
 

@@ -121,6 +121,17 @@ static UInt32 get_current_safety_offset(void) {
     return 16;
 }
 
+#ifndef kAudioDevicePropertyDeviceIsConnected
+#define kAudioDevicePropertyDeviceIsConnected 0x64696666 /* 'diff' */
+#endif
+
+static UInt32 is_hardware_alive(void) {
+    init_tascam_shm();
+    if (!g_tascam_shm) return 0;
+    uint32_t running = atomic_load_explicit(&g_tascam_shm->engine_running, memory_order_relaxed);
+    return (running == 1) ? 1 : 0;
+}
+
 #pragma mark BlackHole State
 //==================================================================================================
 
@@ -301,6 +312,58 @@ static pthread_mutex_t              gPlugIn_StateMutex                  = PTHREA
 static UInt32                       gPlugIn_RefCount                    = 0;
 static AudioServerPlugInHostRef     gPlugIn_Host                        = NULL;
 
+static UInt32 g_last_reported_alive = 999;
+
+static void check_and_notify_alive_state(void) {
+    UInt32 current_alive = is_hardware_alive();
+    if (current_alive != g_last_reported_alive) {
+        g_last_reported_alive = current_alive;
+        if (gPlugIn_Host) {
+            // 1. Notify PlugIn: device list and owned objects changed
+            AudioObjectPropertyAddress plugAddrs[2];
+            plugAddrs[0].mSelector = kAudioPlugInPropertyDeviceList;
+            plugAddrs[0].mScope = kAudioObjectPropertyScopeGlobal;
+            plugAddrs[0].mElement = kAudioObjectPropertyElementMain;
+            plugAddrs[1].mSelector = kAudioObjectPropertyOwnedObjects;
+            plugAddrs[1].mScope = kAudioObjectPropertyScopeGlobal;
+            plugAddrs[1].mElement = kAudioObjectPropertyElementMain;
+            gPlugIn_Host->PropertiesChanged(gPlugIn_Host, kObjectID_PlugIn, 2, plugAddrs);
+
+            // 2. Notify Box: acquisition and device list changed
+            AudioObjectPropertyAddress boxAddrs[2];
+            boxAddrs[0].mSelector = kAudioBoxPropertyAcquired;
+            boxAddrs[0].mScope = kAudioObjectPropertyScopeGlobal;
+            boxAddrs[0].mElement = kAudioObjectPropertyElementMain;
+            boxAddrs[1].mSelector = kAudioBoxPropertyDeviceList;
+            boxAddrs[1].mScope = kAudioObjectPropertyScopeGlobal;
+            boxAddrs[1].mElement = kAudioObjectPropertyElementMain;
+            gPlugIn_Host->PropertiesChanged(gPlugIn_Host, kObjectID_Box, 2, boxAddrs);
+
+            // 3. Notify Device: alive, hidden, can-be-default properties changed
+            AudioObjectPropertyAddress devAddrs[6];
+            devAddrs[0].mSelector = kAudioDevicePropertyDeviceIsAlive;
+            devAddrs[0].mScope = kAudioObjectPropertyScopeGlobal;
+            devAddrs[0].mElement = kAudioObjectPropertyElementMain;
+            devAddrs[1].mSelector = kAudioDevicePropertyIsHidden;
+            devAddrs[1].mScope = kAudioObjectPropertyScopeGlobal;
+            devAddrs[1].mElement = kAudioObjectPropertyElementMain;
+            devAddrs[2].mSelector = kAudioDevicePropertyDeviceCanBeDefaultDevice;
+            devAddrs[2].mScope = kAudioObjectPropertyScopeOutput;
+            devAddrs[2].mElement = kAudioObjectPropertyElementMain;
+            devAddrs[3].mSelector = kAudioDevicePropertyDeviceCanBeDefaultDevice;
+            devAddrs[3].mScope = kAudioObjectPropertyScopeInput;
+            devAddrs[3].mElement = kAudioObjectPropertyElementMain;
+            devAddrs[4].mSelector = kAudioDevicePropertyDeviceCanBeDefaultSystemDevice;
+            devAddrs[4].mScope = kAudioObjectPropertyScopeOutput;
+            devAddrs[4].mElement = kAudioObjectPropertyElementMain;
+            devAddrs[5].mSelector = kAudioDevicePropertyDeviceCanBeDefaultSystemDevice;
+            devAddrs[5].mScope = kAudioObjectPropertyScopeInput;
+            devAddrs[5].mElement = kAudioObjectPropertyElementMain;
+            gPlugIn_Host->PropertiesChanged(gPlugIn_Host, kObjectID_Device, 6, devAddrs);
+            gPlugIn_Host->PropertiesChanged(gPlugIn_Host, kObjectID_Device2, 2, devAddrs);
+        }
+    }
+}
 
 static CFStringRef                  gBox_Name                           = NULL;
 
@@ -826,10 +889,23 @@ static OSStatus	BlackHole_Initialize(AudioServerPlugInDriverRef inDriver, AudioS
 	Float64 theHostClockFrequency = (Float64)theTimeBaseInfo.denom / (Float64)theTimeBaseInfo.numer;
 	theHostClockFrequency *= 1000000000.0;
 	gDevice_HostTicksPerFrame = theHostClockFrequency / gDevice_SampleRate;
-    gDevice_AdjustedTicksPerFrame = gDevice_HostTicksPerFrame - gDevice_HostTicksPerFrame/100.0 * 2.0*(gPitch_Adjust - 0.5);
-    
-    // DebugMsg("BlackHole theTimeBaseInfo.numer: %u \t theTimeBaseInfo.denom: %u", theTimeBaseInfo.numer, theTimeBaseInfo.denom);
-	
+    // Start background monitor for USB hotplug connection and alive state
+    static dispatch_source_t s_alive_timer = NULL;
+    static dispatch_once_t s_alive_once;
+    dispatch_once(&s_alive_once, ^{
+        g_last_reported_alive = is_hardware_alive();
+        dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+        s_alive_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+        if (s_alive_timer) {
+            dispatch_source_set_timer(s_alive_timer, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                                      100 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
+            dispatch_source_set_event_handler(s_alive_timer, ^{
+                check_and_notify_alive_state();
+            });
+            dispatch_resume(s_alive_timer);
+        }
+    });
+
 Done:
 	return theAnswer;
 }
@@ -1422,7 +1498,7 @@ static OSStatus	BlackHole_GetPlugInPropertyDataSize(AudioServerPlugInDriverRef i
 			break;
 			
 		case kAudioObjectPropertyOwnedObjects:
-			if(gBox_Acquired)
+			if(gBox_Acquired && is_hardware_alive())
 			{
 				*outDataSize = 2 * sizeof(AudioClassID);
 			}
@@ -1441,7 +1517,7 @@ static OSStatus	BlackHole_GetPlugInPropertyDataSize(AudioServerPlugInDriverRef i
 			break;
 			
 		case kAudioPlugInPropertyDeviceList:
-			if(gBox_Acquired)
+			if(gBox_Acquired && is_hardware_alive())
 			{
 				*outDataSize = sizeof(AudioClassID)*2;
 			}
@@ -1525,16 +1601,19 @@ static OSStatus	BlackHole_GetPlugInPropertyData(AudioServerPlugInDriverRef inDri
 			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
 			
 			//	Clamp that to the number of boxes this driver implements (which is just 1)
-			if(theNumberItemsToFetch > (gBox_Acquired ? 2 : 1))
 			{
-				theNumberItemsToFetch = (gBox_Acquired ? 2 : 1);
+				UInt32 max_objs = (gBox_Acquired && is_hardware_alive()) ? 2 : 1;
+				if(theNumberItemsToFetch > max_objs)
+				{
+					theNumberItemsToFetch = max_objs;
+				}
 			}
 			
 			//	Write the devices' object IDs into the return value
 			if(theNumberItemsToFetch > 1)
 			{
 				((AudioObjectID*)outData)[0] = kObjectID_Box;
-				((AudioObjectID*)outData)[0] = kObjectID_Device;
+				((AudioObjectID*)outData)[1] = kObjectID_Device;
 			}
 			else if(theNumberItemsToFetch > 0)
 			{
@@ -1581,18 +1660,6 @@ static OSStatus	BlackHole_GetPlugInPropertyData(AudioServerPlugInDriverRef inDri
 
 			if(CFStringCompare(*((CFStringRef*)inQualifierData), boxUID, 0) == kCFCompareEqualTo)
 			{
-				CFStringRef formattedString = CFStringCreateWithFormat(NULL, NULL, CFSTR(kBox_UID), kNumber_Of_Channels);
-				if(CFStringCompare(*((CFStringRef*)inQualifierData), formattedString, 0) == kCFCompareEqualTo)
-				{
-					*((AudioObjectID*)outData) = kObjectID_Box;
-				}
-				else
-				{
-					*((AudioObjectID*)outData) = kAudioObjectUnknown;
-				}
-				*outDataSize = sizeof(AudioObjectID);
-				CFRelease(formattedString);
-
 				*((AudioObjectID*)outData) = kObjectID_Box;
 			}
 			else
@@ -1609,11 +1676,13 @@ static OSStatus	BlackHole_GetPlugInPropertyData(AudioServerPlugInDriverRef inDri
 			//	case, only that number of items will be returned
 			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
 			
-			//	Clamp that to the number of devices this driver implements (which is just 1 if the
-			//	box has been acquired)
-			if(theNumberItemsToFetch > (gBox_Acquired ? 2 : 0))
+			//	Clamp that to the number of devices this driver implements (0 if hardware not alive)
 			{
-				theNumberItemsToFetch = (gBox_Acquired ? 2 : 0);
+				UInt32 max_devs = (gBox_Acquired && is_hardware_alive()) ? 2 : 0;
+				if(theNumberItemsToFetch > max_devs)
+				{
+					theNumberItemsToFetch = max_devs;
+				}
 			}
 			
 			//	Write the devices' object IDs into the return value
@@ -1911,7 +1980,7 @@ static OSStatus	BlackHole_GetBoxPropertyDataSize(AudioServerPlugInDriverRef inDr
 		case kAudioBoxPropertyDeviceList:
 			{
 				pthread_mutex_lock(&gPlugIn_StateMutex);
-				*outDataSize = gBox_Acquired ? sizeof(AudioObjectID) * 2 : 0;
+				*outDataSize = (gBox_Acquired && is_hardware_alive()) ? sizeof(AudioObjectID) * 2 : 0;
 				pthread_mutex_unlock(&gPlugIn_StateMutex);
 			}
 			break;
@@ -2070,7 +2139,7 @@ static OSStatus	BlackHole_GetBoxPropertyData(AudioServerPlugInDriverRef inDriver
 			//	When set to a non-zero value, the device is acquired for use by the local machine
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetBoxPropertyData: not enough space for the return value of kAudioBoxPropertyAcquired for the box");
 			pthread_mutex_lock(&gPlugIn_StateMutex);
-			*((UInt32*)outData) = gBox_Acquired ? 1 : 0;
+			*((UInt32*)outData) = (gBox_Acquired && is_hardware_alive()) ? 1 : 0;
 			pthread_mutex_unlock(&gPlugIn_StateMutex);
 			*outDataSize = sizeof(UInt32);
 			break;
@@ -2085,7 +2154,7 @@ static OSStatus	BlackHole_GetBoxPropertyData(AudioServerPlugInDriverRef inDriver
 		case kAudioBoxPropertyDeviceList:
 			//	This is used to indicate which devices came from this box
 			pthread_mutex_lock(&gPlugIn_StateMutex);
-			if(gBox_Acquired)
+			if(gBox_Acquired && is_hardware_alive())
 			{
                 if(inDataSize < sizeof(AudioObjectID))
                 {
@@ -2259,6 +2328,7 @@ static Boolean	BlackHole_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, 
 		case kAudioDevicePropertyRelatedDevices:
 		case kAudioDevicePropertyClockDomain:
 		case kAudioDevicePropertyDeviceIsAlive:
+		case kAudioDevicePropertyDeviceIsConnected:
 		case kAudioDevicePropertyDeviceIsRunning:
 		case kAudioObjectPropertyControlList:
 		case kAudioDevicePropertyNominalSampleRate:
@@ -2419,7 +2489,8 @@ static OSStatus	BlackHole_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 			break;
 
 		case kAudioDevicePropertyDeviceIsAlive:
-			*outDataSize = sizeof(AudioClassID);
+		case kAudioDevicePropertyDeviceIsConnected:
+			*outDataSize = sizeof(UInt32);
 			break;
 
 		case kAudioDevicePropertyDeviceIsRunning:
@@ -2695,11 +2766,9 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			break;
 
 		case kAudioDevicePropertyDeviceIsAlive:
-			//	This property returns whether or not the device is alive. Note that it is
-			//	not uncommon for a device to be dead but still momentarily available in the
-			//	device list. In the case of this device, it will always be alive.
+		case kAudioDevicePropertyDeviceIsConnected:
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyDeviceIsAlive for the device");
-			*((UInt32*)outData) = 1;
+			*((UInt32*)outData) = is_hardware_alive();
 			*outDataSize = sizeof(UInt32);
 			break;
 
@@ -2734,7 +2803,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			//	will use to play their content on and FaceTime will use as it's microhphone.
 			//	Nearly all devices should allow for this.
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyDeviceCanBeDefaultDevice for the device");
-			*((UInt32*)outData) = kCanBeDefaultDevice;
+			*((UInt32*)outData) = is_hardware_alive() ? kCanBeDefaultDevice : 0;
 			*outDataSize = sizeof(UInt32);
 			break;
 
@@ -2744,7 +2813,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			//	other incidental or UI-related sounds on. Most devices should allow this
 			//	although devices with lots of latency may not want to.
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyDeviceCanBeDefaultSystemDevice for the device");
-			*((UInt32*)outData) = kCanBeDefaultSystemDevice;
+			*((UInt32*)outData) = is_hardware_alive() ? kCanBeDefaultSystemDevice : 0;
 			*outDataSize = sizeof(UInt32);
 			break;
 
@@ -2917,7 +2986,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
             
             switch (inObjectID) {
                 case kObjectID_Device:
-                    *((UInt32*)outData) = kDevice_IsHidden;
+                    *((UInt32*)outData) = is_hardware_alive() ? kDevice_IsHidden : 1;
                     break;
                 
                 case kObjectID_Device2:
