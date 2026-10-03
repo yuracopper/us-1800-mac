@@ -114,11 +114,11 @@ static UInt32 get_current_safety_offset(void) {
     init_tascam_shm();
     if (g_tascam_shm) {
         uint32_t mode = atomic_load_explicit(&g_tascam_shm->latency_mode, memory_order_relaxed);
-        if (mode == TASCAM_MODE_LOW_LATENCY) return 16;
-        if (mode == TASCAM_MODE_BALANCED) return 32;
-        return 128;
+        if (mode == TASCAM_MODE_LOW_LATENCY) return 32;
+        if (mode == TASCAM_MODE_BALANCED) return 48;
+        return 64;
     }
-    return 16;
+    return 32;
 }
 
 #ifndef kAudioDevicePropertyDeviceIsConnected
@@ -2819,7 +2819,11 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 
 		case kAudioDevicePropertyLatency:
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyLatency for the device");
-			*((UInt32*)outData) = get_current_safety_offset();
+			if (inAddress->mScope == kAudioObjectPropertyScopeOutput) {
+				*((UInt32*)outData) = 176; /* 4ms USB isoc transfer pipeline */
+			} else {
+				*((UInt32*)outData) = 32;  /* 32 frames capture buffer */
+			}
 			*outDataSize = sizeof(UInt32);
 			break;
 
@@ -4810,14 +4814,14 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
             uint32_t target_cap_cushion;
             uint32_t max_backlog;
             if (mode == TASCAM_MODE_LOW_LATENCY) {
-                target_cap_cushion = 128;  /* ~2.9ms */
-                max_backlog = 512;
+                target_cap_cushion = 32;  /* ~0.7ms */
+                max_backlog = 96;         /* ~2.1ms */
             } else if (mode == TASCAM_MODE_BALANCED) {
-                target_cap_cushion = 256;  /* ~5.8ms */
-                max_backlog = 1024;
+                target_cap_cushion = 64;  /* ~1.4ms */
+                max_backlog = 192;
             } else {
-                target_cap_cushion = 1024; /* ~23.2ms */
-                max_backlog = 4096;
+                target_cap_cushion = 128; /* ~2.9ms */
+                max_backlog = 384;
             }
 
             if (avail > max_backlog || avail > 30000) {

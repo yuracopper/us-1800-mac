@@ -63,7 +63,7 @@
 #define EP_AUDIO_OUT                 0x02
 #define EP_AUDIO_IN                  0x86
 
-#define NUM_PLAYBACK_XFERS   48
+#define NUM_PLAYBACK_XFERS   4
 #define ISOC_FRAMES_PER_XFER 8
 #define MAX_FRAMES_PER_PKT   24
 #define PLAYBACK_CHANNELS    4
@@ -72,8 +72,8 @@
 
 #define CAPTURE_CHANNELS     16
 #define CAPTURE_FRAME_SIZE   (CAPTURE_CHANNELS * BYTES_PER_SAMPLE)
-#define NUM_CAPTURE_BUFS     8
-#define CAPTURE_BUF_SIZE     4096
+#define NUM_CAPTURE_BUFS     4
+#define CAPTURE_BUF_SIZE     2048
 
 static volatile int g_running = 1;
 static volatile int g_disconnected = 0;
@@ -338,8 +338,8 @@ static void resync_playback(void) {
     UInt64 f = 0;
     AbsoluteTime t;
     (*g_if0)->GetBusFrameNumber(g_if0, &f, &t);
-    if (g_next_isoc_frame < f + 8 || g_next_isoc_frame > f + 200) {
-        g_next_isoc_frame = f + 12;
+    if (g_next_isoc_frame < f + 2 || g_next_isoc_frame > f + 16) {
+        g_next_isoc_frame = f + 3;
     }
 }
 
@@ -348,8 +348,8 @@ static void resync_fb(void) {
     UInt64 f = 0;
     AbsoluteTime t;
     (*g_if1)->GetBusFrameNumber(g_if1, &f, &t);
-    if (g_fb_next_frame < f + 8 || g_fb_next_frame > f + 200) {
-        g_fb_next_frame = f + 12;
+    if (g_fb_next_frame < f + 2 || g_fb_next_frame > f + 16) {
+        g_fb_next_frame = f + 3;
     }
 }
 
@@ -531,20 +531,20 @@ static void submit_playback(PlaybackXfer *x) {
         uint32_t mode = atomic_load_explicit(&g_shm->latency_mode, memory_order_relaxed);
         uint32_t target_cushion;
         if (mode == TASCAM_MODE_LOW_LATENCY) {
-            /* Mode 0: Ultra-Low Latency (Live, ~3.5ms RTL) */
+            /* Mode 0: Ultra-Low Latency (Live, ~5-6ms physical RTL) */
+            target_cushion = buf_sz;
+            if (target_cushion < 32) target_cushion = 32;
+            if (target_cushion > 128) target_cushion = 128;
+        } else if (mode == TASCAM_MODE_BALANCED) {
+            /* Mode 1: Balanced Studio (~8-10ms RTL) */
             target_cushion = buf_sz * 2;
             if (target_cushion < 64) target_cushion = 64;
-            if (target_cushion > 2048) target_cushion = 2048;
-        } else if (mode == TASCAM_MODE_BALANCED) {
-            /* Mode 1: Balanced Studio (~7ms RTL) */
-            target_cushion = buf_sz * 4;
-            if (target_cushion < 256) target_cushion = 256;
-            if (target_cushion > 3072) target_cushion = 3072;
+            if (target_cushion > 256) target_cushion = 256;
         } else {
             /* Mode 2: Safe Conservative (Solid buffer protection) */
-            target_cushion = buf_sz * 6;
-            if (target_cushion < 1024) target_cushion = 1024;
-            if (target_cushion > 4096) target_cushion = 4096;
+            target_cushion = buf_sz * 3;
+            if (target_cushion < 128) target_cushion = 128;
+            if (target_cushion > 512) target_cushion = 512;
         }
 
         /* Seamless cushion adaptation when user switches mode or buffer size */
@@ -658,7 +658,7 @@ static void submit_playback(PlaybackXfer *x) {
         if (++s_drift_check_counter >= 500) { /* check twice every second */
             s_drift_check_counter = 0;
             uint32_t drift_tolerance = target_cushion / 4;
-            if (drift_tolerance < 32) drift_tolerance = 32;
+            if (drift_tolerance < 8) drift_tolerance = 8;
 
             if (avail > target_cushion + drift_tolerance && avail < 16384) {
                 /* Read pointer falling behind (write buffer growing), advance rd by 1 extra frame */
