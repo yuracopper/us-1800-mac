@@ -567,21 +567,21 @@ static void submit_playback(PlaybackXfer *x) {
                 rd = wr;
                 atomic_store_explicit(&g_shm->pb_rd, wr, memory_order_release);
             }
-            return;
-        }
+        } else {
+            s_idle_count = 0;
 
-        s_idle_count = 0;
-
-        /* While buffering after silence, wait for target cushion to fill before playing */
-        if (s_buffering) {
-            if (avail < target_cushion) {
-                memset(x->audio, 0, total_bytes);
-                for (int c = 0; c < 4; c++) g_shm->out_peak[c] = 0.0f;
-                return;
+            /* While buffering after silence, wait for target cushion to fill before playing */
+            if (s_buffering) {
+                if (avail < target_cushion) {
+                    memset(x->audio, 0, total_bytes);
+                    for (int c = 0; c < 4; c++) g_shm->out_peak[c] = 0.0f;
+                } else {
+                    /* Cushion filled! Start playback cleanly without skipping any audio */
+                    s_buffering = false;
+                }
             }
-            /* Cushion filled! Start playback cleanly without skipping any audio */
-            s_buffering = false;
-        }
+
+            if (!s_buffering && avail > 0) {
 
         /* Backlog recovery: ONLY trigger if a massive backlog accumulated
            (e.g. system sleep, track scrub, or audio server freeze > 350ms = 16384 frames).
@@ -661,9 +661,11 @@ static void submit_playback(PlaybackXfer *x) {
 
         atomic_store_explicit(&g_shm->pb_rd, rd, memory_order_release);
         for (int c = 0; c < 4; c++) g_shm->out_peak[c] = peak[c];
-    } else {
-        memset(x->audio, 0, total_bytes);
+        }
     }
+} else {
+    memset(x->audio, 0, total_bytes);
+}
 
     x->start_frame = g_next_isoc_frame;
     g_next_isoc_frame += 1;

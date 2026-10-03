@@ -3018,20 +3018,32 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 				UInt32 newSize = *((const UInt32*)inData);
 				if (newSize >= 16 && newSize <= 2048) {
 					pthread_mutex_lock(&gPlugIn_StateMutex);
-					UInt32 oldSize = gDevice_BufferFrameSize;
+					gDevice_BufferFrameSize = newSize;
 					gDevice_RequestedBufferFrameSize = newSize;
 					pthread_mutex_unlock(&gPlugIn_StateMutex);
 
-					if (newSize != oldSize) {
-						dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-							gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, inObjectID, ChangeAction_SetBufferFrameSize, NULL);
-						});
+					init_tascam_shm();
+					if (g_tascam_shm) {
+						atomic_store_explicit(&g_tascam_shm->buffer_frame_size, newSize, memory_order_relaxed);
 					}
 
 					outChangedAddresses[0].mSelector = kAudioDevicePropertyBufferFrameSize;
 					outChangedAddresses[0].mScope = inAddress->mScope;
 					outChangedAddresses[0].mElement = inAddress->mElement;
 					*outNumberPropertiesChanged = 1;
+
+					// Broadcast property changed to CoreAudio and all audio apps
+					AudioObjectPropertyAddress addrs[3];
+					addrs[0].mSelector = kAudioDevicePropertyBufferFrameSize;
+					addrs[0].mScope = kAudioObjectPropertyScopeGlobal;
+					addrs[0].mElement = kAudioObjectPropertyElementMain;
+					addrs[1].mSelector = kAudioDevicePropertyBufferFrameSize;
+					addrs[1].mScope = kAudioObjectPropertyScopeInput;
+					addrs[1].mElement = kAudioObjectPropertyElementMain;
+					addrs[2].mSelector = kAudioDevicePropertyBufferFrameSize;
+					addrs[2].mScope = kAudioObjectPropertyScopeOutput;
+					addrs[2].mElement = kAudioObjectPropertyElementMain;
+					gPlugIn_Host->PropertiesChanged(gPlugIn_Host, inObjectID, 3, addrs);
 				}
 				break;
 			}
@@ -4774,6 +4786,9 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
                 uint32_t cur_b = atomic_load_explicit(&g_tascam_shm->buffer_frame_size, memory_order_relaxed);
                 if (cur_b != inIOBufferFrameSize) {
                     atomic_store_explicit(&g_tascam_shm->buffer_frame_size, inIOBufferFrameSize, memory_order_relaxed);
+                    pthread_mutex_lock(&gPlugIn_StateMutex);
+                    gDevice_BufferFrameSize = inIOBufferFrameSize;
+                    pthread_mutex_unlock(&gPlugIn_StateMutex);
                 }
             }
 

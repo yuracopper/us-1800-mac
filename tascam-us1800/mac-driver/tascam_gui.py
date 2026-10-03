@@ -840,15 +840,15 @@ class TascamControlApp(tk.Tk):
             self._update_all_displays()
 
     def select_buffer_size(self, buf_size):
-        # 1. Update CoreAudio Hardware Device in real time and read back actual value
-        ca_ok, actual_buf = self.ca_bridge.set_hardware_buffer(buf_size)
-        self.current_buffer = actual_buf if actual_buf in BUFFER_SIZES else buf_size
+        # 1. Update CoreAudio Hardware Device in real time
+        ca_ok, _ = self.ca_bridge.set_hardware_buffer(buf_size)
+        self.current_buffer = buf_size
 
-        # 2. Update Shared Memory
+        # 2. Update Shared Memory directly so live engine adapts immediately
         if self.buf:
             self.buf.buffer_frame_size = self.current_buffer
 
-        # Immediate visual feedback reflecting ground truth
+        # Immediate visual feedback
         self._update_all_displays(confirmed_buffer=self.current_buffer, ca_ok=ca_ok)
 
     def _update_all_displays(self, confirmed_buffer=None, ca_ok=True):
@@ -1043,12 +1043,18 @@ class TascamControlApp(tk.Tk):
     def _ui_tick(self):
         active = self.is_engine_active()
 
-        # Continuously monitor real CoreAudio hardware buffer from macOS / DAW
+        # Continuously monitor real CoreAudio hardware buffer and rate from macOS / DAW
         ca_rate, ca_buf, is_running, is_alive = self.ca_bridge.get_hardware_status()
-        if ca_buf in BUFFER_SIZES and ca_buf != self.current_buffer:
-            self.current_buffer = ca_buf
-            if self.buf:
-                self.buf.buffer_frame_size = ca_buf
+        shm_buf = int(self.buf.buffer_frame_size) if self.buf else 0
+        actual_buf = shm_buf if (shm_buf > 0) else ca_buf
+        if actual_buf > 0 and actual_buf != self.current_buffer:
+            self.current_buffer = actual_buf
+            self._update_all_displays()
+
+        shm_rate = int(self.buf.sample_rate) if self.buf else 0
+        actual_rate = shm_rate if (shm_rate > 0) else ca_rate
+        if actual_rate > 0 and actual_rate != self.current_rate:
+            self.current_rate = actual_rate
             self._update_all_displays()
 
         if self.buf:
