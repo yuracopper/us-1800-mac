@@ -9,6 +9,7 @@
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/usb/IOUSBLib.h>
 #include <IOKit/usb/USBSpec.h>
+#include <IOKit/IOMessage.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
@@ -81,11 +82,32 @@ static void on_sig(int s) { (void)s; g_running = 0; }
 
 static inline bool is_usb_fatal_error(IOReturn res) {
     if (res == kIOReturnSuccess) return false;
-    /* ONLY physical device unplug codes are fatal: */
+    /* Isochronous timing & stall codes are non-fatal, recoverable in-flight: */
+    if (res == (IOReturn)0xe00002ee) return false; /* isoc frame time passed */
+    if (res == (IOReturn)0xe000404f) return false; /* pipe stall */
+    if (res == (IOReturn)0xe00002eb) return false; /* aborted transfer */
+    if (res == (IOReturn)0xe00002e8) return false; /* data underrun */
+    if (res == (IOReturn)0xe00002e7) return false; /* data overrun */
+
+    /* Definite USB disconnect or destroyed device handles: */
     if (res == (IOReturn)0xe00002c0) return true;  /* kIOReturnNoDevice */
     if (res == (IOReturn)0xe00002d7) return true;  /* kIOReturnNotAttached */
-    /* All other conditions (aborted packets 0xe00002eb, frame skips, stalls) are recoverable */
+    if (res == (IOReturn)0xe00002ed) return true;  /* kIOReturnNotResponding */
+    if (res == (IOReturn)0xe00002d5) return true;  /* kIOReturnOffline */
+    if (res == (IOReturn)0xe00002bc) return true;  /* kIOReturnError */
+    if (res == (IOReturn)0xe00002c2) return true;  /* kIOReturnBadArgument */
     return false;
+}
+
+static IONotificationPortRef g_notify_port = NULL;
+static io_object_t g_device_notification = 0;
+
+static void on_device_notification(void *refCon, io_service_t service, natural_t messageType, void *messageArgument) {
+    (void)refCon; (void)service; (void)messageArgument;
+    if (messageType == kIOMessageServiceIsTerminated) {
+        fprintf(stderr, "[!] IOKit kernel event: USB device detached!\n");
+        g_disconnected = 1;
+    }
 }
 
 static void set_realtime_priority(void) {
@@ -794,6 +816,10 @@ static void cleanup_hardware(void) {
         (*g_dev)->Release(g_dev);
         g_dev = NULL;
     }
+    if (g_device_notification) {
+        IOObjectRelease(g_device_notification);
+        g_device_notification = 0;
+    }
     g_pipe_out = -1;
     g_pipe_bulk_in = -1;
     g_pipe_fb = -1;
@@ -819,6 +845,24 @@ static bool try_init_hardware(void) {
 
     io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, match);
     if (!svc) return false;
+
+    if (!g_notify_port) {
+        g_notify_port = IONotificationPortCreate(kIOMainPortDefault);
+        CFRunLoopSourceRef rls = IONotificationPortGetRunLoopSource(g_notify_port);
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), rls, kCFRunLoopDefaultMode);
+    }
+    if (g_device_notification) {
+        IOObjectRelease(g_device_notification);
+        g_device_notification = 0;
+    }
+    IOServiceAddInterestNotification(
+        g_notify_port,
+        svc,
+        kIOGeneralInterest,
+        on_device_notification,
+        NULL,
+        &g_device_notification
+    );
 
     IOCFPlugInInterface **plug = NULL;
     SInt32 score;
@@ -1057,6 +1101,18 @@ int main(int argc, char *argv[]) {
         }
 
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
+
+        /* Periodic health check: verify device is still physically enumerated */
+        static int s_poll_counter = 0;
+        if (g_dev && ++s_poll_counter >= 50) { /* every ~500ms */
+            s_poll_counter = 0;
+            USBDeviceAddress dev_addr = 0;
+            kern_return_t kr = (*g_dev)->GetDeviceAddress(g_dev, &dev_addr);
+            if (is_usb_fatal_error(kr)) {
+                fprintf(stderr, "[!] Periodic health check: USB device detached (0x%08x)\n", kr);
+                g_disconnected = 1;
+            }
+        }
 
         if (g_disconnected) {
             fprintf(stderr, "[!] USB connection lost! Cleaning up...\n");

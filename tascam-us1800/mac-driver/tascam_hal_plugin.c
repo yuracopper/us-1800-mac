@@ -129,23 +129,27 @@ static UInt32 is_hardware_alive(void) {
     init_tascam_shm();
     if (!g_tascam_shm) return 0;
     uint32_t running = atomic_load_explicit(&g_tascam_shm->engine_running, memory_order_relaxed);
+    if (running != 1) return 0;
 
-    static uint64_t s_last_alive_time = 0;
+    static uint64_t s_last_hb = 0;
+    static uint64_t s_last_change_ms = 0;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 
-    if (running == 1) {
-        s_last_alive_time = now_ms;
+    uint64_t hb = atomic_load_explicit(&g_tascam_shm->engine_heartbeat, memory_order_relaxed);
+    if (hb != s_last_hb) {
+        s_last_hb = hb;
+        s_last_change_ms = now_ms;
         return 1;
     }
 
-    /* Grace period: allow 4.0 seconds for USB re-syncs before reporting device death to CoreAudio */
-    if (s_last_alive_time > 0 && (now_ms - s_last_alive_time < 4000)) {
-        return 1;
+    /* If heartbeat hasn't updated in over 1.5 seconds, daemon must be dead or frozen */
+    if (s_last_change_ms > 0 && (now_ms - s_last_change_ms > 1500)) {
+        return 0;
     }
 
-    return 0;
+    return 1;
 }
 
 #pragma mark BlackHole State
