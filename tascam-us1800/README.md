@@ -6,6 +6,7 @@
   <img src="https://img.shields.io/badge/Latency-Ultra--Low%20(~5.5ms%20RTL)-success?style=for-the-badge" alt="Latency" />
   <img src="https://img.shields.io/badge/Channels-16%20In%20%2F%204%20Out-orange?style=for-the-badge" alt="Channels" />
   <img src="https://img.shields.io/badge/SIP-Enabled%20(No%20Kext%20Required)-brightgreen?style=for-the-badge" alt="SIP" />
+  <img src="https://img.shields.io/badge/License-MIT%20%2F%20GPLv2-lightgrey?style=for-the-badge" alt="License" />
 </p>
 
 <p align="center">
@@ -14,78 +15,87 @@
 
 ---
 
-## О проекте / Overview
+## Overview
 
-**TASCAM US-1800** — легендарный рэковый 16-входовой / 4-выходной USB 2.0 аудиоинтерфейс с великолепными преампами. Официальные драйверы от производителя перестали работать на современных версиях macOS из-за отказа Apple от устаревших расширений ядра (`.kext`) и перехода на процессоры Apple Silicon (M1/M2/M3/M4).
+The **TASCAM US-1800** is a legendary 16-input / 4-output rackmount USB 2.0 audio interface renowned for its high-headroom microphone preamplifiers and reliable analog circuitry. Official vendor driver support ended when Apple deprecated legacy 32-bit kernel extensions (`.kext`) and transitioned the Mac platform to Apple Silicon (M1/M2/M3/M4).
 
-Данный проект — это **полнофункциональный нативный драйвер нового поколения**, написанный с нуля на C и Objective-C на основе реверс-инжиниринга протокола обмена. Драйвер работает целиком в пространстве пользователя (userspace) через **Apple IOKit** и **CoreAudio AudioServerPlugIn HAL**, **не требует отключения SIP** (System Integrity Protection) и обеспечивает профессиональную студийную стабильность с минимальной аппаратной задержкой.
-
-> **English summary:** Native userspace CoreAudio HAL driver and hardware streaming engine for the **TASCAM US-1800** USB audio interface on modern macOS (Apple Silicon M1–M4 & Intel, macOS 12 Monterey through macOS 15 Sequoia+). No kernel extensions, no SIP disabling required, 16 inputs / 4 outputs, hardware PLL clock sync, native AppKit control console, down to ~5.5 ms round-trip latency.
+This project is a **modern, ground-up native driver suite** written in C and Objective-C based on clean-room reverse engineering of the device protocol. Operating entirely in userspace via **Apple IOKit** and a **CoreAudio AudioServerPlugIn HAL driver**, it requires **no kernel extensions and no SIP (System Integrity Protection) disabling**, delivering professional studio stability with ultra-low physical latency.
 
 ---
 
-## Ключевые возможности
+## Key Features
 
-* **Полная нативная поддержка Apple Silicon (ARM64) и Intel (x86_64):**
-  * macOS 12 Monterey, 13 Ventura, 14 Sonoma, 15 Sequoia и новее.
-* **Прямая интеграция с macOS CoreAudio:**
-  * Карта распознается как нативное системное аудиоустройство `TASCAM US-1800` во всех DAW (Logic Pro, Studio One, Reaper, Ableton Live, Cubase, FL Studio, Bitwig, Pro Tools) и системных настройках macOS.
-* **16 Каналов захвата (Capture) и 4 Канала вывода (Playback):**
-  * **Ch 1–8:** Микрофонные/линейные XLR входы на передней панели (с фантомным питанием +48V).
-  * **Ch 9–10:** Инструментальные (Hi-Z гитара/бас) / линейные входы 1/4" на передней панели.
-  * **Ch 11–14:** Балансные линейные входы 1/4" TRS на задней панели.
-  * **Ch 15–16:** Цифровой коаксиальный вход S/PDIF (RCA).
-  * **Out 1–2:** Основные мониторные выходы Main Outputs и выход на наушники Phones.
-  * **Out 3–4:** Независимые линейные выходы Line Outputs 3 & 4.
-* **Ультранизкая задержка (Ultra-Low Latency):**
-  * Поддержка аппаратных буферов CoreAudio от **32 до 2048 сэмплов**.
-  * Физическая задержка в обе стороны (Round-Trip Latency) **~5.5–6.0 мс** на буфере 32/64 при 44.1 кГц.
-  * Три переключаемых на лету профиля движка: `Ultra-Low (Live)`, `Balanced (Studio)`, `Safe (Heavy Mix)`.
-* **Аппаратная PLL-синхронизация частоты (Feedback Endpoint 0x81):**
-  * Точная дробная подстройка фазового аккумулятора под кварцевый генератор ЦАПа в реальном времени. Полное отсутствие щелчков, треска и дрейфа питча.
-* **100% Bit-Perfect 24-bit PCM:**
-  * Прямая побитовая передача PCM сэмплов (`S24_3LE`) без потерь динамического диапазона.
-* **CoreAudio HAL Grace Period (Защита от отвалов):**
-  * Интеллектуальный 4-секундный демпфер предотвращает сброс звука на динамики ноутбука при микросекундных тайминговых задержках USB.
-* **Устойчивость к анимациям и App Nap:**
-  * Поток реального времени с системным приоритетом `QOS_CLASS_USER_INTERACTIVE` и очередью в 12 мс — воспроизведение не заикается при переключении между рабочими столами (Spaces) и Mission Control.
-* **Нативная панель управления (Apple Silicon Pro Console):**
-  * Приложение **`TASCAM US-1800.app`** на Cocoa/AppKit с 16-канальным LED-мостом, индикацией перегрузки (Clip), dBFS-измерителями, переключением буферов и встроенным генератором тестового тона 440 Гц.
-* **Поддержка Linux:**
-  * В репозитории также включен исходный код модуля ядра Linux ALSA (`tascam-us1800/linux-driver/`).
+* **Full Native Apple Silicon (ARM64) & Intel (x86_64) Support:**
+  * Tested and optimized for macOS 12 (Monterey), 13 (Ventura), 14 (Sonoma), 15 (Sequoia), and newer.
+* **Direct macOS CoreAudio Integration:**
+  * Appears as a native audio device `TASCAM US-1800` across macOS Sound Preferences, Audio MIDI Setup, and all DAWs (Logic Pro, Studio One, Reaper, Ableton Live, Cubase, FL Studio, Pro Tools, Bitwig).
+* **16 Capture Inputs & 4 Playback Outputs (Full-Duplex):**
+  * **Channels 1–8:** Front-panel XLR Mic/Line preamps with switchable +48V phantom power.
+  * **Channels 9–10:** Front-panel 1/4" Instrument (Hi-Z Guitar/Bass) and Line inputs.
+  * **Channels 11–14:** Rear-panel balanced 1/4" TRS Line inputs.
+  * **Channels 15–16:** Coaxial S/PDIF digital input (RCA).
+  * **Outputs 1–2:** Main Monitor stereo outputs and front-panel Headphone out.
+  * **Outputs 3–4:** Independent balanced Line outputs 3 & 4 (auxiliary/cue).
+* **Ultra-Low Latency Engine:**
+  * Hardware CoreAudio buffer sizes from **32 to 2048 samples**.
+  * Physical round-trip latency (RTL) down to **~5.5–6.0 ms** at 32/64 samples (44.1 kHz).
+  * Three live-switchable engine profiles: `Ultra-Low (Live)`, `Balanced (Studio)`, and `Safe (Heavy Mix)`.
+* **Hardware PLL Feedback Clock Sync (Endpoint 0x81):**
+  * Real-time fractional phase accumulator dynamically locks packet delivery to the hardware DAC crystal oscillator, eliminating digital jitter, clock drift, crackles, and pops.
+* **100% Bit-Perfect 24-Bit PCM:**
+  * Pure 24-bit PCM transmission (`S24_3LE`) without software resampling or pitch distortion.
+* **CoreAudio HAL Grace Period (Anti-Flapping):**
+  * A 4.0-second damping grace period in the HAL driver prevents macOS from abruptly switching audio routing to internal MacBook speakers during momentary USB timing hiccups or cable resyncs.
+* **Spaces & App Nap Immunity:**
+  * The streaming daemon runs under `QOS_CLASS_USER_INTERACTIVE` with an extended Mach real-time computation budget and a 12 ms transfer queue, ensuring glitch-free playback even during virtual desktop (Spaces) animations and Mission Control gestures.
+* **Native Pro Audio Control Console (`TASCAM US-1800.app`):**
+  * Lightweight Cocoa/AppKit application featuring:
+    * 16-channel LED bridge with peak hold and clip overload warning LEDs;
+    * Real-time monospace dBFS level readouts;
+    * Master Monitor stereo output meters;
+    * Live buffer size and latency profile switcher;
+    * Integrated 440 Hz reference tone generator;
+    * One-click shortcuts to Audio MIDI Setup and macOS Sound Settings.
+* **Linux ALSA Driver:**
+  * An ALSA kernel module implementation is also included in `tascam-us1800/linux-driver/`.
 
 ---
 
-## Быстрая установка (macOS)
+## Installation (macOS)
 
-### Способ 1: В один клик (Рекомендуется)
+### Option 1: One-Click GUI Install (Recommended)
 
-1. Подключите звуковую карту **TASCAM US-1800** к Mac через USB.
-2. Дважды щелкните по файлу **`Установить_драйвер.command`** (или **`Install_Driver.command`**).
-3. В открывшемся окне Терминала введите ваш пароль администратора Mac.
-4. Скрипт соберет актуальные бинарники под ваш процессор, установит плагин HAL, запустит фоновую службу и откроет «Настройки звука».
-5. Выберите **TASCAM US-1800** в качестве устройства вывода и ввода!
+1. Connect your **TASCAM US-1800** to your Mac via USB.
+2. Double-click **`Install_Driver.command`** (or **`Установить_драйвер.command`**) in the project folder.
+3. Enter your Mac administrator password when prompted in the Terminal window.
+4. The installer compiles the latest native binaries for your Mac architecture, installs the HAL plugin, starts the background service, and opens macOS Sound Settings.
+5. Select **TASCAM US-1800** as your default Input and Output device!
 
-### Способ 2: Через Терминал
+### Option 2: From Terminal
 
 ```bash
 git clone https://github.com/yuracopper/us-1800-mac.git
-cd us-1800-mac/tascam-us1800/mac-driver
-sudo ./install_hal_driver.sh
+cd us-1800-mac
+./Install_Driver.command
 ```
-
-### Запуск панели управления
-
-Дважды щелкните на **`TASCAM US-1800.app`** на Рабочем столе или в корне репозитория. В панели доступны:
-* Выбор аппаратного размера буфера (32, 64, 128, 256, 512, 1024, 2048 сэмплов);
-* Переключение профиля задержки (`Ultra-Low`, `Balanced`, `Safe`);
-* Мониторинг всех 16 входов и 2 мастер-каналов;
-* Тестовый генератор синусоиды 440 Гц для проверки тракта;
-* Быстрый переход в системные настройки Audio MIDI Setup и macOS Sound.
 
 ---
 
-## Архитектура драйвера
+## Control Console
+
+To open the control panel, double-click **`TASCAM US-1800.app`** in the root of the repository or on your Desktop:
+
+* **Buffer Size Selector:** Choose between 16, 32, 64, 128, 256, 512, 1024, or 2048 samples.
+* **Latency Profiles:**
+  * **Ultra-Low (Live):** Minimum buffer cushion for live instrument and vocal tracking (~5.5 ms RTL).
+  * **Balanced (Studio):** Balanced buffer cushion for tracking and general mixing (~8 ms RTL).
+  * **Safe (Heavy Mix):** Conservative safety margin for CPU-heavy DAW projects.
+* **Meters:** Monitor incoming signals on all 16 inputs and master stereo outputs with sample-accurate peak hold.
+* **Reference Tone:** Play a clean 440 Hz sine wave to verify signal routing through your monitors and headphones.
+
+---
+
+## Driver Architecture
 
 ```
   ┌────────────────────────────────────────────────────────┐
@@ -95,18 +105,18 @@ sudo ./install_hal_driver.sh
                               ▼
   ┌────────────────────────────────────────────────────────┐
   │  TASCAM_US1800.driver (CoreAudio HAL Plugin in coreaudiod) │
-  │  - ZeroTimeStamp tracking                              │
-  │  - 4.0s Connection Grace Period                        │
-  │  - Latency profile & buffer negotiation                │
+  │  - ZeroTimeStamp host clock synchronization             │
+  │  - 4.0s Connection Grace Period (anti-flapping)         │
+  │  - Latency profile & buffer frame negotiation          │
   └───────────────────────────┬────────────────────────────┘
                               │ Lock-Free Shared Memory Ring (/tascam_us1800_shm)
                               ▼
   ┌────────────────────────────────────────────────────────┐
   │       tascam_live_engine (Userspace Real-Time Daemon)   │
   │  - Mach Real-Time Priority (QoS USER_INTERACTIVE)       │
-  │  - Fractional phase PLL sync via EP 0x81               │
-  │  - 16-channel bit-slice decoder                        │
-  │  - 12ms Isochronous transfer queue with auto-resync    │
+  │  - Fractional phase PLL sync via Feedback EP 0x81       │
+  │  - 16-channel bit-slice capture decoder                 │
+  │  - 12ms Isochronous transfer queue with auto-resync     │
   └───────────────────────────┬────────────────────────────┘
                               │ Apple IOKit USB (EP 0x02, EP 0x86, EP 0x81)
                               ▼
@@ -117,51 +127,42 @@ sudo ./install_hal_driver.sh
 
 ---
 
-## Структура репозитория
+## Repository Structure
 
 ```text
-├── Install_Driver.command               # Скрипт установки в 1 клик (English)
-├── Установить_драйвер.command           # Скрипт установки в 1 клик (Русский)
-├── TASCAM US-1800.app                   # Нативное приложение Pro Audio Control Console
+├── Install_Driver.command               # One-click installer (English)
+├── Установить_драйвер.command           # One-click installer (Russian)
+├── TASCAM US-1800.app                   # Native Pro Audio Control Console application
 ├── docs/
-│   └── console_preview.png              # Скриншот панели управления
+│   └── console_preview.png              # Control Console screenshot
 └── tascam-us1800/
-    ├── mac-driver/                      # Нативный драйвер и компоненты для macOS
-    │   ├── tascam_live_engine.c         # Высокоскоростной аппаратный IOKit USB-движок
-    │   ├── tascam_hal_plugin.c          # CoreAudio AudioServerPlugIn HAL драйвер
-    │   ├── tascam_console_native.m      # Исходный код нативной панели на AppKit
-    │   ├── tascam_shm.h                 # Заголовочный файл lock-free разделяемой памяти
-    │   ├── build.sh                     # Скрипт компиляции всех бинарников под ARM64
-    │   ├── install_hal_driver.sh        # Скрипт системной установки и настройки LaunchDaemon
-    │   ├── monitor.c                    # Диагностическая утилита джиттера и дрейфа клока
-    │   └── TASCAM_US1800.driver/        # Собранный бандл CoreAudio HAL драйвера
-    └── linux-driver/                    # Драйвер ALSA для ядра Linux
-        ├── us1800.c                     # Регистрация устройства и ALSA интерфейсов
-        ├── us1800_playback.c            # Вывод звука с изохронным фидбеком
-        ├── us1800_capture.c             # Захват 16 каналов через Bulk EP 0x86
-        └── Makefile                     # Сборка модуля ядра Linux
+    ├── mac-driver/                      # macOS native driver sources & tools
+    │   ├── tascam_live_engine.c         # High-speed IOKit USB hardware engine
+    │   ├── tascam_hal_plugin.c          # CoreAudio AudioServerPlugIn HAL driver
+    │   ├── tascam_console_native.m      # Native AppKit control console source code
+    │   ├── tascam_shm.h                 # Lock-free shared memory ring buffer definitions
+    │   ├── build.sh                     # Compilation script for ARM64 / x86_64
+    │   ├── install_hal_driver.sh        # System installation and LaunchDaemon setup script
+    │   ├── monitor.c                    # Hardware clock drift and stream monitor utility
+    │   └── TASCAM_US1800.driver/        # CoreAudio HAL driver bundle
+    └── linux-driver/                    # Linux ALSA kernel module driver
+        ├── us1800.c                     # Device probe and ALSA interface registration
+        ├── us1800_playback.c            # Audio playback with feedback endpoint support
+        ├── us1800_capture.c             # 16-channel capture via Bulk EP 0x86
+        └── Makefile                     # Linux kernel build file
 ```
 
 ---
 
-## English Quick Start
+## System Requirements
 
-1. Connect the **TASCAM US-1800** to your Mac via USB.
-2. Double-click **`Install_Driver.command`** and enter your administrator password in Terminal.
-3. Open **System Settings > Sound** and select **TASCAM US-1800** as output and input.
-4. Launch **`TASCAM US-1800.app`** to configure buffer sizes, monitor real-time input levels, and switch latency profiles.
-
----
-
-## Требования / Requirements
-
-* **macOS:** 12.0 (Monterey), 13.0 (Ventura), 14.0 (Sonoma), 15.0 (Sequoia) или новее.
-* **Процессор:** Apple Silicon (M1, M1 Pro/Max/Ultra, M2, M3, M4) или Intel Core i5/i7/i9/Xeon (x86_64).
-* **SIP:** Включен (отключать System Integrity Protection **не требуется**).
-* **Кабель:** USB-кабель со стабильным питанием (желательно подключать напрямую в Mac или через качественный powered hub).
+* **macOS:** macOS 12 (Monterey), macOS 13 (Ventura), macOS 14 (Sonoma), macOS 15 (Sequoia), or later.
+* **Hardware:** Apple Silicon (M1, M1 Pro/Max/Ultra, M2, M3, M4) or Intel (x86_64).
+* **SIP:** Enabled (disabling System Integrity Protection is **not** required).
+* **Connection:** USB 2.0 direct connection or via a quality powered USB hub.
 
 ---
 
-## Лицензия / License
+## License
 
-Проект распространяется под лицензией **MIT / GPLv2**. Создано с любовью для музыкантов, звукорежиссеров и владельцев надежного оборудования TASCAM.
+This project is licensed under the **MIT / GPLv2** licenses. Developed with passion for musicians, audio engineers, and owners of classic TASCAM studio hardware.
