@@ -86,13 +86,13 @@ static inline bool is_usb_fatal_error(IOReturn res) {
     if (res == (IOReturn)0xe00002ee) return false; /* isoc frame time passed */
     if (res == (IOReturn)0xe000404f) return false; /* pipe stall */
     if (res == (IOReturn)0xe00002eb) return false; /* aborted transfer */
+    if (res == (IOReturn)0xe00002ed) return false; /* bulk NAK / transaction timeout */
     if (res == (IOReturn)0xe00002e8) return false; /* data underrun */
     if (res == (IOReturn)0xe00002e7) return false; /* data overrun */
 
     /* Definite USB disconnect or destroyed device handles: */
     if (res == (IOReturn)0xe00002c0) return true;  /* kIOReturnNoDevice */
     if (res == (IOReturn)0xe00002d7) return true;  /* kIOReturnNotAttached */
-    if (res == (IOReturn)0xe00002ed) return true;  /* kIOReturnNotResponding */
     if (res == (IOReturn)0xe00002d5) return true;  /* kIOReturnOffline */
     if (res == (IOReturn)0xe00002bc) return true;  /* kIOReturnError */
     if (res == (IOReturn)0xe00002c2) return true;  /* kIOReturnBadArgument */
@@ -310,7 +310,7 @@ static void on_bulk_complete(void *refCon, IOReturn result, void *arg0) {
         return;
     }
 
-    if (result == (IOReturn)0xe000404f && g_if1) {
+    if ((result == (IOReturn)0xe000404f || result == (IOReturn)0xe00002ed) && g_if1) {
         (*g_if1)->ClearPipeStallBothEnds(g_if1, g_pipe_bulk_in);
     }
 
@@ -360,7 +360,7 @@ static void queue_bulk_read(int buf_idx) {
             g_disconnected = 1;
             return;
         }
-        if (kr == (kern_return_t)0xe000404f && g_if1) {
+        if ((kr == (kern_return_t)0xe000404f || kr == (kern_return_t)0xe00002ed) && g_if1) {
             (*g_if1)->ClearPipeStallBothEnds(g_if1, g_pipe_bulk_in);
         }
         kr = (*g_if1)->ReadPipeAsync(
